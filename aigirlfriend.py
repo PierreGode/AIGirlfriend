@@ -12,7 +12,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 client = OpenAI()
 
 # Set your name at the beginning of the script
-user_name = "Pierre"
+user_name = "Love"
 
 conversation_history = [
     {"role": "system", "content": "You are my assistant. Please answer in short sentences."}
