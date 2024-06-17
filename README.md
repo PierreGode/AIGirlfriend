@@ -4,6 +4,8 @@ Voice Ai GPT4o girlfriend
 
 ![image](https://github.com/PierreGode/AIGirlfriend/assets/8579922/b89df15d-071e-4d5f-a3eb-832f735dd22b)
 
+![CodeQL Alerts](https://badge-hub.herokuapp.com/badge/github/code-scanning-alerts/open?repo=PierreGode/AIGirlfriend&label=CodeQL%20Alerts&token=YTOKEN)
+
 
 Clone repo to Windows machine
 ```
