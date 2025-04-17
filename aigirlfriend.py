@@ -2,13 +2,16 @@ from openai import OpenAI
 from langchain.chat_models import ChatOpenAI
 from langchain.memory import ConversationBufferMemory
 from langchain.schema import AIMessage, HumanMessage, SystemMessage
-from utils import record_audio
 import warnings
 import os
 import time
 import uuid
 import platform
 import pyaudio
+import sounddevice as sd
+import numpy as np
+import scipy.io.wavfile
+from io import BytesIO
 from threading import Thread
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -31,6 +34,18 @@ Always respond with kindness and care, and make {user_name} feel seen and apprec
 memory = ConversationBufferMemory(return_messages=True)
 memory.chat_memory.add_message(SystemMessage(content=initial_prompt))
 
+# Preload GPT och TTS för att minska cold start
+_ = chat.predict_messages(messages=[
+    SystemMessage(content="You are Nova, a helpful AI."),
+    HumanMessage(content="Hi!")
+])
+_ = client.audio.speech.create(
+    model="tts-1",
+    voice="nova",
+    input="Hello!",
+    response_format="pcm"
+)
+
 # Direktuppspelning av ljud från OpenAI:s TTS (PCM)
 def play_audio_stream(audio_stream):
     p = pyaudio.PyAudio()
@@ -46,13 +61,23 @@ def play_audio_stream(audio_stream):
     stream.close()
     p.terminate()
 
+# Spela in ljud direkt till RAM som WAV-format
+def record_audio_bytes(duration=4, samplerate=16000):
+    print("🎙️ Inspelning...")
+    recording = sd.rec(int(samplerate * duration), samplerate=samplerate, channels=1, dtype='int16')
+    sd.wait()
+    buffer = BytesIO()
+    scipy.io.wavfile.write(buffer, samplerate, recording)
+    buffer.seek(0)
+    print("🛑 Klar!")
+    return buffer
+
 # Huvudlogik för röstinspelning, transkribering och AI-svar
 def process_audio():
-    record_audio('test.wav')
-    audio_file = open('test.wav', "rb")
+    audio_bytes = record_audio_bytes()
     transcription = client.audio.transcriptions.create(
         model='whisper-1',
-        file=audio_file
+        file=audio_bytes
     )
     user_input = transcription.text
     print(f">>> Du: {user_input}")
@@ -64,7 +89,6 @@ def process_audio():
 
     print(f"Nova: {assistant_message}")
 
-    # Skapa TTS och streama direkt
     speech_response = client.audio.speech.create(
         model="tts-1",
         voice="nova",
@@ -73,9 +97,6 @@ def process_audio():
     )
 
     play_audio_stream(speech_response)
-
-    audio_file.close()
-    os.remove('test.wav')
 
 # Startar samtalsloopen
 while True:
