@@ -10,6 +10,7 @@ import pyaudio
 import sounddevice as sd
 import wave
 import tempfile
+import re
 from threading import Thread
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -93,16 +94,21 @@ def process_audio():
     assistant_message = response.content
     memory.chat_memory.add_message(AIMessage(content=assistant_message))
 
-    print(f"Nova: {assistant_message}")
+    print(f"Nova (GPT): {assistant_message}")
 
-    speech_response = client.audio.speech.create(
-        model="tts-1",
-        voice="nova",
-        input=assistant_message,
-        response_format="pcm"
-    )
+    # Dela upp GPT-svaret i meningar för snabbare playback
+    sentences = re.split(r'(?<=[.!?])\s+', assistant_message)
 
-    play_audio_stream(speech_response)
+    for sentence in sentences:
+        if sentence.strip():
+            print(f"Nova säger: {sentence}")
+            speech_response = client.audio.speech.create(
+                model="tts-1",
+                voice="nova",
+                input=sentence,
+                response_format="pcm"
+            )
+            play_audio_stream(speech_response)
 
     os.remove(wav_path)
 
