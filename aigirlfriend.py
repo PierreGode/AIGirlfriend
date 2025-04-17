@@ -1,15 +1,17 @@
 from openai import OpenAI
-from langchain.chat_models import ChatOpenAI
+from langchain_community.chat_models import ChatOpenAI
 from langchain.memory import ConversationBufferMemory
 from langchain.schema import AIMessage, HumanMessage, SystemMessage
-from utils import record_audio, play_audio
 import warnings
 import os
+import pyaudio
+import sounddevice as sd
+import wave
+import tempfile
+import re
 import time
-import pygame
-import uuid
-import platform
 from threading import Thread
+from concurrent.futures import ThreadPoolExecutor
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -17,7 +19,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 client = OpenAI()
 chat = ChatOpenAI(model="gpt-4.1-mini")
 
-# Användarnamn
+# username
 user_name = "Love"
 
 # Initialt systemmeddelande
@@ -31,76 +33,92 @@ Always respond with kindness and care, and make {user_name} feel seen and apprec
 memory = ConversationBufferMemory(return_messages=True)
 memory.chat_memory.add_message(SystemMessage(content=initial_prompt))
 
-# Plattformsspecifik ljuduppspelning
-def play_audio_with_pygame(file_path):
-    pygame.mixer.init()
-    time.sleep(0.5)
-    pygame.mixer.music.load(file_path)
-    pygame.mixer.music.set_volume(1.0)
-    time.sleep(0.5)
-    pygame.mixer.music.play()
-    while pygame.mixer.music.get_busy():
-        time.sleep(1)
-    pygame.mixer.quit()
+_ = chat.predict_messages(messages=[
+    SystemMessage(content="You are Nova, a helpful AI Girlfirend."),
+    HumanMessage(content="Hi!")
+])
+_ = client.audio.speech.create(
+    model="tts-1",
+    voice="nova",
+    input="Hello!",
+    response_format="pcm"
+)
 
-def play_audio_with_alsa(file_path):
-    try:
-        import alsaaudio
-        import wave
+# Direktuppspelning av ljud från OpenAI:s TTS (PCM)
+def play_audio_stream(audio_stream):
+    p = pyaudio.PyAudio()
+    stream = p.open(format=pyaudio.paInt16,
+                    channels=1,
+                    rate=24000,
+                    output=True)
 
-        wf = wave.open(file_path, 'rb')
-        device = alsaaudio.PCM(alsaaudio.PCM_PLAYBACK)
-        device.setchannels(wf.getnchannels())
-        device.setrate(wf.getframerate())
-        device.setformat(alsaaudio.PCM_FORMAT_S16_LE)
-        device.setperiodsize(320)
-        data = wf.readframes(320)
-        audio_data = []
-        while data:
-            audio_data.append(data)
-            data = wf.readframes(320)
-        time.sleep(0.5)
-        for chunk in audio_data:
-            device.write(chunk)
-        wf.close()
-    except Exception as e:
-        print(f"Error playing audio with ALSA: {e}")
+    for chunk in audio_stream.iter_bytes(chunk_size=1024):
+        stream.write(chunk)
 
-is_windows = platform.system() == "Windows"
+    stream.stop_stream()
+    stream.close()
+    p.terminate()
 
-# Huvudlogik för röstinspelning, transkribering och AI-svar
-def process_audio():
-    record_audio('test.wav')
-    audio_file = open('test.wav', "rb")
-    transcription = client.audio.transcriptions.create(
-        model='whisper-1',
-        file=audio_file
+# Spela in ljud till en temporär WAV-fil
+def record_audio_tempfile(duration=4, samplerate=16000):
+    print("🎙️ listening..")
+    recording = sd.rec(int(samplerate * duration), samplerate=samplerate, channels=1, dtype='int16')
+    sd.wait()
+
+    temp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+    with wave.open(temp.name, 'wb') as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)  # 16-bit
+        wf.setframerate(samplerate)
+        wf.writeframes(recording.tobytes())
+
+    print("Got it!")
+    return temp.name
+
+# Hjälpfunktion för TTS av en mening
+def generate_tts(sentence):
+    return sentence, client.audio.speech.create(
+        model="tts-1",
+        voice="nova",
+        input=sentence,
+        response_format="pcm"
     )
+
+# Huvudlogik
+def process_audio():
+    wav_path = record_audio_tempfile()
+
+    with open(wav_path, "rb") as audio_file:
+        transcription = client.audio.transcriptions.create(
+            model='whisper-1',
+            file=audio_file
+        )
+
     user_input = transcription.text
-    print(user_input)
+    print(f">>> Du: {user_input}")
 
     memory.chat_memory.add_message(HumanMessage(content=user_input))
     response = chat.predict_messages(messages=memory.load_memory_variables({})["history"])
     assistant_message = response.content
     memory.chat_memory.add_message(AIMessage(content=assistant_message))
 
-    print(assistant_message)
+    print(f"Nova (GPT): {assistant_message}")
 
-    speech_response = client.audio.speech.create(
-        model="tts-1",
-        voice="nova",
-        input=assistant_message
-    )
-    speech_filename = f"speech_{uuid.uuid4()}.mp3"
-    speech_response.stream_to_file(speech_filename)
+    # Dela upp i meningar
+    sentences = re.split(r'(?<=[.!?])\s+', assistant_message)
 
-    if is_windows:
-        play_audio_with_pygame(speech_filename)
-    else:
-        play_audio_with_alsa(speech_filename)
+    # Generera TTS parallellt
+    with ThreadPoolExecutor() as executor:
+        results = list(executor.map(generate_tts, sentences))
 
-    audio_file.close()
-    os.remove(speech_filename)
+    # Spela upp i rätt ordning med kort paus
+    for sentence, tts_response in results:
+        if sentence.strip():
+            print(f"Nova säger: {sentence}")
+            play_audio_stream(tts_response)
+            time.sleep(0.05)
+
+    os.remove(wav_path)
 
 # Startar samtalsloopen
 while True:

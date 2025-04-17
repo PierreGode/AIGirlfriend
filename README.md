@@ -1,6 +1,6 @@
 # AIGirlfriend
 
-Voice Ai GPT4o girlfriend
+Voice Ai gpt-4.1-mini girlfriend
 
 ![image](https://github.com/PierreGode/AIGirlfriend/assets/8579922/b89df15d-071e-4d5f-a3eb-832f735dd22b)
 
@@ -22,4 +22,4 @@ Set API key in Enviroment
 $env:OPENAI_API_KEY="sk-proj-"
 ```
 
-Edit aigirlfriend.py and set your name in row 15 change "Love"
+Edit aigirlfriend.py and set your name in row 23 change "Love"
