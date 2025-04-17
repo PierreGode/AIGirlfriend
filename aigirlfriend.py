@@ -15,7 +15,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # OpenAI-klienter
 client = OpenAI()
-chat = ChatOpenAI(model="gpt-4o")
+chat = ChatOpenAI(model="gpt-4.1-mini")
 
 # Användarnamn
 user_name = "Love"
