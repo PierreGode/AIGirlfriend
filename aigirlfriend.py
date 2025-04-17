@@ -6,12 +6,10 @@ import warnings
 import os
 import time
 import uuid
-import platform
 import pyaudio
 import sounddevice as sd
-import numpy as np
-import scipy.io.wavfile
-from io import BytesIO
+import wave
+import tempfile
 from threading import Thread
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -49,9 +47,9 @@ _ = client.audio.speech.create(
 # Direktuppspelning av ljud från OpenAI:s TTS (PCM)
 def play_audio_stream(audio_stream):
     p = pyaudio.PyAudio()
-    stream = p.open(format=pyaudio.paInt16,  # 16-bit PCM
+    stream = p.open(format=pyaudio.paInt16,
                     channels=1,
-                    rate=24000,  # OpenAI TTS använder 24kHz
+                    rate=24000,
                     output=True)
 
     for chunk in audio_stream.iter_bytes(chunk_size=1024):
@@ -61,24 +59,32 @@ def play_audio_stream(audio_stream):
     stream.close()
     p.terminate()
 
-# Spela in ljud direkt till RAM som WAV-format
-def record_audio_bytes(duration=4, samplerate=16000):
+# Spela in ljud till en temporär WAV-fil
+def record_audio_tempfile(duration=4, samplerate=16000):
     print("🎙️ Inspelning...")
     recording = sd.rec(int(samplerate * duration), samplerate=samplerate, channels=1, dtype='int16')
     sd.wait()
-    buffer = BytesIO()
-    scipy.io.wavfile.write(buffer, samplerate, recording)
-    buffer.seek(0)
-    print("🛑 Klar!")
-    return buffer
 
-# Huvudlogik för röstinspelning, transkribering och AI-svar
+    temp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+    with wave.open(temp.name, 'wb') as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)  # 16-bit
+        wf.setframerate(samplerate)
+        wf.writeframes(recording.tobytes())
+
+    print("🛑 Klar!")
+    return temp.name
+
+# Huvudlogik för inspelning, transkribering, GPT och TTS
 def process_audio():
-    audio_bytes = record_audio_bytes()
-    transcription = client.audio.transcriptions.create(
-        model='whisper-1',
-        file=audio_bytes
-    )
+    wav_path = record_audio_tempfile()
+
+    with open(wav_path, "rb") as audio_file:
+        transcription = client.audio.transcriptions.create(
+            model='whisper-1',
+            file=audio_file
+        )
+
     user_input = transcription.text
     print(f">>> Du: {user_input}")
 
@@ -93,10 +99,12 @@ def process_audio():
         model="tts-1",
         voice="nova",
         input=assistant_message,
-        response_format="pcm"  # RAW 16-bit PCM
+        response_format="pcm"
     )
 
     play_audio_stream(speech_response)
+
+    os.remove(wav_path)
 
 # Startar samtalsloopen
 while True:
