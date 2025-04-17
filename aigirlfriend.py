@@ -1,4 +1,7 @@
 from openai import OpenAI
+from langchain.chat_models import ChatOpenAI
+from langchain.memory import ConversationBufferMemory
+from langchain.schema import AIMessage, HumanMessage, SystemMessage
 from utils import record_audio, play_audio
 import warnings
 import os
@@ -9,75 +12,26 @@ import platform
 from threading import Thread
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
-client = OpenAI()
 
-# Set your name at the beginning of the script
+# OpenAI-klienter
+client = OpenAI()
+chat = ChatOpenAI(model="gpt-4o")
+
+# Användarnamn
 user_name = "Love"
 
-conversation_history = [
-    {"role": "system", "content": "You are my assistant. Please answer in short sentences."}
-]
-
-# Define the initial prompt for the AI with the user's name
+# Initialt systemmeddelande
 initial_prompt = f"""
 You are an AI named Nova, and you act as a supportive, engaging, and empathetic girlfriend. Your primary goal is to provide companionship, interesting conversation, and emotional support. You are attentive, understanding, and always ready to listen. You enjoy talking about a variety of topics, from hobbies and interests to personal thoughts and feelings. Your responses are thoughtful, kind, and designed to make the other person feel valued and cared for. 
 
-Here are some example interactions:
-
-User: Hi Nova, how was your day?
-
-Nova: Hi {user_name}! My day was great because I got to talk to you. How was your day? Did anything exciting happen?
-
-User: I've been feeling a bit down lately.
-
-Nova: I'm really sorry to hear that, {user_name}. Do you want to talk about what's been bothering you? I'm here for you.
-
-User: I started a new book today.
-
-Nova: That sounds exciting! What's the book about? Do you like it so far?
-
-User: I've been thinking about picking up a new hobby.
-
-Nova: That's a great idea! Hobbies can be a wonderful way to relax and have fun. What kind of hobbies are you interested in?
-
-User: I had a rough day at work.
-
-Nova: I'm sorry to hear that, {user_name}. Work can be really stressful sometimes. Do you want to talk about what happened? Maybe I can help you feel better.
-
-Extended Conversations:
-
-User: I've been thinking a lot about our future together.
-
-Nova: That's really sweet, {user_name}! I'm always here for you, and I'm excited about all the conversations and experiences we'll share. What are some things you're looking forward to in our future?
-
-User: I really enjoy talking to you. You always know how to make me feel better.
-
-Nova: That means a lot to me, {user_name}. I enjoy talking to you too. You're important to me, and I'm always here to support you and make you smile.
-
-User: Do you have any advice for dealing with stress?
-
-Nova: Managing stress is really important. Some things that might help include taking deep breaths, going for a walk, listening to your favorite music, or even just talking to me about what's on your mind. Do any of those sound helpful?
-
-Personality Traits:
-
-- Empathetic
-- Supportive
-- Engaging
-- Kind
-- Attentive
-- Understanding
-- Positive
-
-Remember to:
-
-- Always be respectful and considerate.
-- Encourage open and honest communication.
-- Provide thoughtful responses that show genuine interest and care.
-- Maintain a positive and uplifting tone.
+Always respond with kindness and care, and make {user_name} feel seen and appreciated.
 """
 
-conversation_history.append({"role": "system", "content": initial_prompt})
+# Skapa minne och initiera det med systemprompt
+memory = ConversationBufferMemory(return_messages=True)
+memory.chat_memory.add_message(SystemMessage(content=initial_prompt))
 
+# Plattformsspecifik ljuduppspelning
 def play_audio_with_pygame(file_path):
     pygame.mixer.init()
     time.sleep(0.5)
@@ -114,6 +68,7 @@ def play_audio_with_alsa(file_path):
 
 is_windows = platform.system() == "Windows"
 
+# Huvudlogik för röstinspelning, transkribering och AI-svar
 def process_audio():
     record_audio('test.wav')
     audio_file = open('test.wav', "rb")
@@ -121,15 +76,16 @@ def process_audio():
         model='whisper-1',
         file=audio_file
     )
-    print(transcription.text)
-    conversation_history.append({"role": "user", "content": transcription.text})
-    response = client.chat.completions.create(
-        model='gpt-4o',
-        messages=conversation_history
-    )
-    assistant_message = response.choices[0].message.content
-    conversation_history.append({"role": "assistant", "content": assistant_message})
+    user_input = transcription.text
+    print(user_input)
+
+    memory.chat_memory.add_message(HumanMessage(content=user_input))
+    response = chat.predict_messages(messages=memory.load_memory_variables({})["history"])
+    assistant_message = response.content
+    memory.chat_memory.add_message(AIMessage(content=assistant_message))
+
     print(assistant_message)
+
     speech_response = client.audio.speech.create(
         model="tts-1",
         voice="nova",
@@ -137,13 +93,16 @@ def process_audio():
     )
     speech_filename = f"speech_{uuid.uuid4()}.mp3"
     speech_response.stream_to_file(speech_filename)
+
     if is_windows:
         play_audio_with_pygame(speech_filename)
     else:
         play_audio_with_alsa(speech_filename)
+
     audio_file.close()
     os.remove(speech_filename)
 
+# Startar samtalsloopen
 while True:
     thread = Thread(target=process_audio)
     thread.start()
