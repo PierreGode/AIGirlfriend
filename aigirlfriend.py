@@ -33,9 +33,8 @@ Always respond with kindness and care, and make {user_name} feel seen and apprec
 memory = ConversationBufferMemory(return_messages=True)
 memory.chat_memory.add_message(SystemMessage(content=initial_prompt))
 
-# Preload GPT och TTS för att minska cold start
 _ = chat.predict_messages(messages=[
-    SystemMessage(content="You are Nova, a helpful AI."),
+    SystemMessage(content="You are Nova, a helpful AI Girlfirend."),
     HumanMessage(content="Hi!")
 ])
 _ = client.audio.speech.create(
@@ -62,7 +61,7 @@ def play_audio_stream(audio_stream):
 
 # Spela in ljud till en temporär WAV-fil
 def record_audio_tempfile(duration=4, samplerate=16000):
-    print("🎙️ Inspelning...")
+    print("🎙️ listening..")
     recording = sd.rec(int(samplerate * duration), samplerate=samplerate, channels=1, dtype='int16')
     sd.wait()
 
@@ -73,7 +72,7 @@ def record_audio_tempfile(duration=4, samplerate=16000):
         wf.setframerate(samplerate)
         wf.writeframes(recording.tobytes())
 
-    print("🛑 Klar!")
+    print("Got it!")
     return temp.name
 
 # Hjälpfunktion för TTS av en mening
