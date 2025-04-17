@@ -117,7 +117,7 @@ def process_audio():
         if sentence.strip():
             print(f"Nova säger: {sentence}")
             play_audio_stream(tts_response)
-            time.sleep(0.1)
+            time.sleep(0.05)
 
     os.remove(wav_path)
 
