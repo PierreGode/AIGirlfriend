@@ -2,13 +2,13 @@ from openai import OpenAI
 from langchain.chat_models import ChatOpenAI
 from langchain.memory import ConversationBufferMemory
 from langchain.schema import AIMessage, HumanMessage, SystemMessage
-from utils import record_audio, play_audio
+from utils import record_audio
 import warnings
 import os
 import time
-import pygame
 import uuid
 import platform
+import pyaudio
 from threading import Thread
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -31,42 +31,20 @@ Always respond with kindness and care, and make {user_name} feel seen and apprec
 memory = ConversationBufferMemory(return_messages=True)
 memory.chat_memory.add_message(SystemMessage(content=initial_prompt))
 
-# Plattformsspecifik ljuduppspelning
-def play_audio_with_pygame(file_path):
-    pygame.mixer.init()
-    time.sleep(0.5)
-    pygame.mixer.music.load(file_path)
-    pygame.mixer.music.set_volume(1.0)
-    time.sleep(0.5)
-    pygame.mixer.music.play()
-    while pygame.mixer.music.get_busy():
-        time.sleep(1)
-    pygame.mixer.quit()
+# Direktuppspelning av ljud från OpenAI:s TTS (PCM)
+def play_audio_stream(audio_stream):
+    p = pyaudio.PyAudio()
+    stream = p.open(format=pyaudio.paInt16,  # 16-bit PCM
+                    channels=1,
+                    rate=24000,  # OpenAI TTS använder 24kHz
+                    output=True)
 
-def play_audio_with_alsa(file_path):
-    try:
-        import alsaaudio
-        import wave
+    for chunk in audio_stream.iter_bytes(chunk_size=1024):
+        stream.write(chunk)
 
-        wf = wave.open(file_path, 'rb')
-        device = alsaaudio.PCM(alsaaudio.PCM_PLAYBACK)
-        device.setchannels(wf.getnchannels())
-        device.setrate(wf.getframerate())
-        device.setformat(alsaaudio.PCM_FORMAT_S16_LE)
-        device.setperiodsize(320)
-        data = wf.readframes(320)
-        audio_data = []
-        while data:
-            audio_data.append(data)
-            data = wf.readframes(320)
-        time.sleep(0.5)
-        for chunk in audio_data:
-            device.write(chunk)
-        wf.close()
-    except Exception as e:
-        print(f"Error playing audio with ALSA: {e}")
-
-is_windows = platform.system() == "Windows"
+    stream.stop_stream()
+    stream.close()
+    p.terminate()
 
 # Huvudlogik för röstinspelning, transkribering och AI-svar
 def process_audio():
@@ -77,30 +55,27 @@ def process_audio():
         file=audio_file
     )
     user_input = transcription.text
-    print(user_input)
+    print(f">>> Du: {user_input}")
 
     memory.chat_memory.add_message(HumanMessage(content=user_input))
     response = chat.predict_messages(messages=memory.load_memory_variables({})["history"])
     assistant_message = response.content
     memory.chat_memory.add_message(AIMessage(content=assistant_message))
 
-    print(assistant_message)
+    print(f"Nova: {assistant_message}")
 
+    # Skapa TTS och streama direkt
     speech_response = client.audio.speech.create(
         model="tts-1",
         voice="nova",
-        input=assistant_message
+        input=assistant_message,
+        response_format="pcm"  # RAW 16-bit PCM
     )
-    speech_filename = f"speech_{uuid.uuid4()}.mp3"
-    speech_response.stream_to_file(speech_filename)
 
-    if is_windows:
-        play_audio_with_pygame(speech_filename)
-    else:
-        play_audio_with_alsa(speech_filename)
+    play_audio_stream(speech_response)
 
     audio_file.close()
-    os.remove(speech_filename)
+    os.remove('test.wav')
 
 # Startar samtalsloopen
 while True:
