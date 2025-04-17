@@ -4,14 +4,14 @@ from langchain.memory import ConversationBufferMemory
 from langchain.schema import AIMessage, HumanMessage, SystemMessage
 import warnings
 import os
-import time
-import uuid
 import pyaudio
 import sounddevice as sd
 import wave
 import tempfile
 import re
+import time
 from threading import Thread
+from concurrent.futures import ThreadPoolExecutor
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -76,7 +76,16 @@ def record_audio_tempfile(duration=4, samplerate=16000):
     print("🛑 Klar!")
     return temp.name
 
-# Huvudlogik för inspelning, transkribering, GPT och TTS
+# Hjälpfunktion för TTS av en mening
+def generate_tts(sentence):
+    return sentence, client.audio.speech.create(
+        model="tts-1",
+        voice="nova",
+        input=sentence,
+        response_format="pcm"
+    )
+
+# Huvudlogik
 def process_audio():
     wav_path = record_audio_tempfile()
 
@@ -96,19 +105,19 @@ def process_audio():
 
     print(f"Nova (GPT): {assistant_message}")
 
-    # Dela upp GPT-svaret i meningar för snabbare playback
+    # Dela upp i meningar
     sentences = re.split(r'(?<=[.!?])\s+', assistant_message)
 
-    for sentence in sentences:
+    # Generera TTS parallellt
+    with ThreadPoolExecutor() as executor:
+        results = list(executor.map(generate_tts, sentences))
+
+    # Spela upp i rätt ordning med kort paus
+    for sentence, tts_response in results:
         if sentence.strip():
             print(f"Nova säger: {sentence}")
-            speech_response = client.audio.speech.create(
-                model="tts-1",
-                voice="nova",
-                input=sentence,
-                response_format="pcm"
-            )
-            play_audio_stream(speech_response)
+            play_audio_stream(tts_response)
+            time.sleep(0.4)  # Naturlig paus
 
     os.remove(wav_path)
 
