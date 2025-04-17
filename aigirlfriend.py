@@ -19,7 +19,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 client = OpenAI()
 chat = ChatOpenAI(model="gpt-4.1-mini")
 
-# Användarnamn
+# username
 user_name = "Love"
 
 # Initialt systemmeddelande
