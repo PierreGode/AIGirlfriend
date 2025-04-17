@@ -3,3 +3,4 @@ pyaudio
 pygame
 SpeechRecognition
 setuptools
+langchain-community
