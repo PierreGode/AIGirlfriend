@@ -4,3 +4,4 @@ pygame
 SpeechRecognition
 setuptools
 langchain-community
+scipy
