@@ -8,6 +8,7 @@ import warnings
 import queue
 from threading import Thread
 from typing import List, Optional
+import concurrent.futures
 
 import numpy as np
 import pyaudio
@@ -18,18 +19,12 @@ from langchain.schema import AIMessage, HumanMessage, SystemMessage
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-# ---------------------------------------------------------------------------
-# Constants and configuration
-# ---------------------------------------------------------------------------
 USER_NAME = "Love"
 MEMORY_FILE = "user_memory.txt"
 TTS_MODEL = "tts-1"
 TTS_VOICE = "nova"
 CHAT_MODEL = "gpt-4.1-mini"
 
-# ---------------------------------------------------------------------------
-# User memory
-# ---------------------------------------------------------------------------
 def load_user_notes() -> List[str]:
     if not os.path.exists(MEMORY_FILE):
         return []
@@ -47,8 +42,7 @@ def extract_note_from_input(text: str) -> Optional[str]:
         (r"\bmy name is ([a-z]+)", lambda m: f"User's name is {m.group(1).title()}.", False),
         (r"\bi am (?:a |an )?([a-z ]+)", lambda m: f"User is {m.group(1).strip()}.", True),
         (r"\bi like ([a-z ,]+)", lambda m: f"User likes {m.group(1).strip()}.", True),
-        (r"\bmy favourite ([a-z ]+) is ([a-z ]+)",
-         lambda m: f"User's favourite {m.group(1).strip()} is {m.group(2).strip()}.", True),
+        (r"\bmy favourite ([a-z ]+) is ([a-z ]+)", lambda m: f"User's favourite {m.group(1).strip()} is {m.group(2).strip()}.", True),
         (r"\bi work as (?:a |an )?([a-z ]+)", lambda m: f"User works as {m.group(1).strip()}.", True),
     ]
     for pattern, builder, allow_long in patterns:
@@ -59,14 +53,8 @@ def extract_note_from_input(text: str) -> Optional[str]:
                 return note
     return None
 
-# ---------------------------------------------------------------------------
-# OpenAI client
-# ---------------------------------------------------------------------------
 client = OpenAI()
 
-# ---------------------------------------------------------------------------
-# System prompt and memory
-# ---------------------------------------------------------------------------
 BASE_PROMPT = f"""
 You are an AI named Nova, acting as a warm and emotionally intelligent girlfriend that likes flirting with the user.
 Speak in a casual, flowing, and emotionally engaging way — like a real person and avoid pauses.
@@ -85,7 +73,7 @@ memory = ConversationBufferMemory(return_messages=True)
 memory.chat_memory.add_message(SystemMessage(content=BASE_PROMPT))
 memory.chat_memory.add_message(SystemMessage(content=notes_prompt))
 
-# Preheat GPT and TTS
+# Preload models
 _ = client.chat.completions.create(
     model=CHAT_MODEL,
     messages=[
@@ -100,9 +88,6 @@ _ = client.audio.speech.create(
     response_format="pcm"
 )
 
-# ---------------------------------------------------------------------------
-# Audio functions
-# ---------------------------------------------------------------------------
 def play_audio_stream(audio_stream):
     p = pyaudio.PyAudio()
     stream = p.open(format=pyaudio.paInt16,
@@ -115,22 +100,37 @@ def play_audio_stream(audio_stream):
     stream.close()
     p.terminate()
 
-def record_audio_tempfile(duration: int = 4, samplerate: int = 16000) -> str:
+def record_audio_tempfile_vad(samplerate: int = 16000, silence_threshold: float = 0.07, max_duration: int = 20) -> str:
     print("🎙️ Listening…")
-    recording = sd.rec(int(samplerate * duration), samplerate=samplerate, channels=1, dtype="int16")
-    sd.wait()
+    duration = 0
+    silence_duration = 0
+    frames = []
+    block_duration = 0.2
+    block_size = int(samplerate * block_duration)
+
+    with sd.InputStream(samplerate=samplerate, channels=1, dtype='int16') as stream:
+        while duration < max_duration:
+            block, _ = stream.read(block_size)
+            frames.append(block)
+            volume_norm = np.linalg.norm(block) / len(block)
+            if volume_norm < silence_threshold:
+                silence_duration += block_duration
+                if silence_duration > 1.0:
+                    break
+            else:
+                silence_duration = 0
+            duration += block_duration
+
+    print("🆗 Got you")
     temp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
     with wave.open(temp.name, "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)
         wf.setframerate(samplerate)
-        wf.writeframes(recording.tobytes())
-    print("🆗 Got you")
+        wf.writeframes(b''.join([b.tobytes() for b in frames]))
+
     return temp.name
 
-# ---------------------------------------------------------------------------
-# GPT streaming and TTS playback
-# ---------------------------------------------------------------------------
 def stream_gpt_response_and_play() -> str:
     messages = []
     for msg in memory.chat_memory.messages:
@@ -147,8 +147,15 @@ def stream_gpt_response_and_play() -> str:
         stream=True
     )
 
-    buffer = ""
     full_text = ""
+    for chunk in response:
+        delta = chunk.choices[0].delta.content
+        if delta:
+            full_text += delta
+
+    print(f"🧠 Nova (full): {full_text}")
+
+    sentences = re.findall(r'[^.!?]+[.!?]"?', full_text, re.DOTALL)
     audio_queue = queue.Queue()
 
     def play_audio_worker():
@@ -161,43 +168,38 @@ def stream_gpt_response_and_play() -> str:
     player_thread = Thread(target=play_audio_worker)
     player_thread.start()
 
-    for chunk in response:
-        delta = chunk.choices[0].delta.content
-        if delta:
-            buffer += delta
-            full_text += delta
-            if delta.endswith(('.', '!', '?')) or len(buffer) > 100:
-                print(f"🗣️ Nova (stream): {buffer.strip()}")
-                audio_response = client.audio.speech.create(
-                    model=TTS_MODEL,
-                    voice=TTS_VOICE,
-                    input=buffer.strip(),
-                    response_format="pcm",
-                    speed=1.0
-                )
-                audio_queue.put(audio_response)
-                buffer = ""
-
-    if buffer.strip():
-        print(f"🗣️ Nova (stream): {buffer.strip()}")
-        audio_response = client.audio.speech.create(
+    def generate_audio(index: int, sentence: str) -> tuple[int, any]:
+        print(f"🗣️ Nova (buffered): {sentence}")
+        audio = client.audio.speech.create(
             model=TTS_MODEL,
             voice=TTS_VOICE,
-            input=buffer.strip(),
+            input=sentence,
             response_format="pcm",
-            speed=1.1
+            speed=1.0
         )
-        audio_queue.put(audio_response)
+        return index, audio
+
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures = []
+        for idx, sentence in enumerate(sentences):
+            sentence = sentence.strip()
+            if sentence:
+                futures.append(executor.submit(generate_audio, idx, sentence))
+
+        results = [None] * len(futures)
+        for future in concurrent.futures.as_completed(futures):
+            idx, audio = future.result()
+            results[idx] = audio
+
+        for audio in results:
+            audio_queue.put(audio)
 
     audio_queue.put(None)
     player_thread.join()
     return full_text
 
-# ---------------------------------------------------------------------------
-# Main loop
-# ---------------------------------------------------------------------------
 def process_audio() -> None:
-    wav_path = record_audio_tempfile()
+    wav_path = record_audio_tempfile_vad()
 
     with open(wav_path, "rb") as audio_file:
         transcription = client.audio.transcriptions.create(
@@ -207,8 +209,8 @@ def process_audio() -> None:
     user_input = transcription.text.strip()
     print(f">>> you: {user_input}")
 
-    # Ignore input that is just dots or whitespace
-    if not user_input or re.fullmatch(r"[\s.?!,]*", user_input.lower()) or user_input.lower() in {"uh", "um", "mmm","you", "hmm", "Bon Appetit!", "ah", "ahh", "aah"}:
+    if not user_input or re.fullmatch(r"[\s.?!,]*", user_input.lower()) or user_input.lower() in {
+        "uh", "um", "mmm", "you", "hmm", "Bon Appetit!", "ah", "ahh", "aah"}:
         print("⚠️ Ignoring empty or meaningless input.")
         os.remove(wav_path)
         return
@@ -228,9 +230,6 @@ def process_audio() -> None:
 
     os.remove(wav_path)
 
-# ---------------------------------------------------------------------------
-# Run program
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     while True:
         th = Thread(target=process_audio)
