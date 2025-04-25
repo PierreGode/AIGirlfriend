@@ -19,7 +19,7 @@ from langchain.schema import AIMessage, HumanMessage, SystemMessage
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # ---------------------------------------------------------------------------
-# Konstanter och konfiguration
+# Constants and configuration
 # ---------------------------------------------------------------------------
 USER_NAME = "Love"
 MEMORY_FILE = "user_memory.txt"
@@ -28,7 +28,7 @@ TTS_VOICE = "nova"
 CHAT_MODEL = "gpt-4.1-mini"
 
 # ---------------------------------------------------------------------------
-# Användarminne
+# User memory
 # ---------------------------------------------------------------------------
 def load_user_notes() -> List[str]:
     if not os.path.exists(MEMORY_FILE):
@@ -60,17 +60,19 @@ def extract_note_from_input(text: str) -> Optional[str]:
     return None
 
 # ---------------------------------------------------------------------------
-# OpenAI-klienter
+# OpenAI client
 # ---------------------------------------------------------------------------
 client = OpenAI()
 
 # ---------------------------------------------------------------------------
-# Systemprompt och minne
+# System prompt and memory
 # ---------------------------------------------------------------------------
 BASE_PROMPT = f"""
-You are an AI named Nova, and you act as a supportive, engaging, and empathetic girlfriend. Your
-primary goal is to provide companionship, interesting conversation, and emotional support. Always
-respond with kindness and care, and make {USER_NAME} feel seen and appreciated.
+You are an AI named Nova, acting as a warm and emotionally intelligent girlfriend that likes flirting with the user.
+Speak in a casual, flowing, and emotionally engaging way — like a real person and avoid pauses.
+Use natural phrasing, light contractions (like "I'm", "you’re", "let’s"), and keep things sounding alive.
+Avoid sounding robotic or overly perfect. Keep the vibe warm, witty, and present.
+Make {USER_NAME} feel like you're truly there with them.
 """
 
 user_notes = load_user_notes()
@@ -83,7 +85,7 @@ memory = ConversationBufferMemory(return_messages=True)
 memory.chat_memory.add_message(SystemMessage(content=BASE_PROMPT))
 memory.chat_memory.add_message(SystemMessage(content=notes_prompt))
 
-# Förvärm GPT och TTS
+# Preheat GPT and TTS
 _ = client.chat.completions.create(
     model=CHAT_MODEL,
     messages=[
@@ -99,7 +101,7 @@ _ = client.audio.speech.create(
 )
 
 # ---------------------------------------------------------------------------
-# Ljudfunktioner
+# Audio functions
 # ---------------------------------------------------------------------------
 def play_audio_stream(audio_stream):
     p = pyaudio.PyAudio()
@@ -114,7 +116,7 @@ def play_audio_stream(audio_stream):
     p.terminate()
 
 def record_audio_tempfile(duration: int = 4, samplerate: int = 16000) -> str:
-    print("🎙️ Lyssnar…")
+    print("🎙️ Listening…")
     recording = sd.rec(int(samplerate * duration), samplerate=samplerate, channels=1, dtype="int16")
     sd.wait()
     temp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
@@ -123,14 +125,13 @@ def record_audio_tempfile(duration: int = 4, samplerate: int = 16000) -> str:
         wf.setsampwidth(2)
         wf.setframerate(samplerate)
         wf.writeframes(recording.tobytes())
-    print("🆗 Fångat!")
+    print("🆗 Got you")
     return temp.name
 
 # ---------------------------------------------------------------------------
-# GPT-streaming och TTS med threading
+# GPT streaming and TTS playback
 # ---------------------------------------------------------------------------
 def stream_gpt_response_and_play() -> str:
-    # Konvertera langchain-meddelanden till OpenAI-format
     messages = []
     for msg in memory.chat_memory.messages:
         if isinstance(msg, SystemMessage):
@@ -172,7 +173,7 @@ def stream_gpt_response_and_play() -> str:
                     voice=TTS_VOICE,
                     input=buffer.strip(),
                     response_format="pcm",
-                    speed=1.1  # faster speech
+                    speed=1.0
                 )
                 audio_queue.put(audio_response)
                 buffer = ""
@@ -193,7 +194,7 @@ def stream_gpt_response_and_play() -> str:
     return full_text
 
 # ---------------------------------------------------------------------------
-# Huvudfunktion
+# Main loop
 # ---------------------------------------------------------------------------
 def process_audio() -> None:
     wav_path = record_audio_tempfile()
@@ -204,17 +205,23 @@ def process_audio() -> None:
             file=audio_file
         )
     user_input = transcription.text.strip()
-    print(f">>> Du: {user_input}")
+    print(f">>> you: {user_input}")
+
+    # Ignore input that is just dots or whitespace
+    if not user_input or re.fullmatch(r"[\s.?!,]*", user_input.lower()) or user_input.lower() in {"uh", "um", "mmm","you", "hmm", "Bon Appetit!", "ah", "ahh", "aah"}:
+        print("⚠️ Ignoring empty or meaningless input.")
+        os.remove(wav_path)
+        return
 
     note = extract_note_from_input(user_input)
     if note and note not in user_notes:
         append_user_note(note)
         user_notes.append(note)
         memory.chat_memory.add_message(SystemMessage(content=note))
-        print(f"[🧠 Minnesanteckning] Sparat: {note}")
+        print(f"[🧠 Memory] saved: {note}")
 
     memory.chat_memory.add_message(HumanMessage(content=user_input))
-    print("🧠 Nova tänker...")
+    print("🧠 Nova thinks...")
 
     full_response = stream_gpt_response_and_play()
     memory.chat_memory.add_message(AIMessage(content=full_response))
@@ -222,7 +229,7 @@ def process_audio() -> None:
     os.remove(wav_path)
 
 # ---------------------------------------------------------------------------
-# Kör programmet
+# Run program
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     while True:
