@@ -1,22 +1,11 @@
-"""nova_voice_chat.py
-Voice‑chat demo that remembers key facts about the user across sessions without storing full
-conversations. It detects facts in the user's utterances (e.g. “My name is…”, “I like…”) and writes
-short notes to *user_memory.txt*. When the program starts, those notes are loaded and injected into
-the system prompt so the assistant can use them immediately.
-
-Dependencies:
-    pip install -r requirements.txt
-
-IMPORTANT: Ensure that your environment has a valid `OPENAI_API_KEY` in the shell like $env:OPENAI_API_KEY="sk-proj- or a .env file.
-"""
-
 from __future__ import annotations
 
 import os
 import re
-import warnings
 import wave
 import tempfile
+import warnings
+import queue
 from threading import Thread
 from typing import List, Optional
 
@@ -24,14 +13,13 @@ import numpy as np
 import pyaudio
 import sounddevice as sd
 from openai import OpenAI
-from langchain_community.chat_models import ChatOpenAI
 from langchain.memory import ConversationBufferMemory
 from langchain.schema import AIMessage, HumanMessage, SystemMessage
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # ---------------------------------------------------------------------------
-# Constants & configuration
+# Konstanter och konfiguration
 # ---------------------------------------------------------------------------
 USER_NAME = "Love"
 MEMORY_FILE = "user_memory.txt"
@@ -40,25 +28,20 @@ TTS_VOICE = "nova"
 CHAT_MODEL = "gpt-4.1-mini"
 
 # ---------------------------------------------------------------------------
-# Persistent user‑note helpers
+# Användarminne
 # ---------------------------------------------------------------------------
-
 def load_user_notes() -> List[str]:
     if not os.path.exists(MEMORY_FILE):
         return []
     with open(MEMORY_FILE, "r", encoding="utf-8") as f:
         return [line.strip() for line in f if line.strip()]
 
-
 def append_user_note(note: str) -> None:
-    """Append a new note to the memory file if it doesn't already exist."""
     if note and note not in load_user_notes():
         with open(MEMORY_FILE, "a", encoding="utf-8") as f:
             f.write(note + "\n")
 
-
 def extract_note_from_input(text: str) -> Optional[str]:
-    """Return a short memory note derived from the user's message, or None."""
     text_lower = text.lower()
     patterns = [
         (r"\bmy name is ([a-z]+)", lambda m: f"User's name is {m.group(1).title()}.", False),
@@ -72,19 +55,17 @@ def extract_note_from_input(text: str) -> Optional[str]:
         match = re.search(pattern, text_lower)
         if match:
             note = builder(match)
-            # Skip overly generic or extremely long notes.
             if not allow_long or len(note) < 80:
                 return note
     return None
 
 # ---------------------------------------------------------------------------
-# OpenAI clients
+# OpenAI-klienter
 # ---------------------------------------------------------------------------
 client = OpenAI()
-chat = ChatOpenAI(model=CHAT_MODEL)
 
 # ---------------------------------------------------------------------------
-# System prompt & memory
+# Systemprompt och minne
 # ---------------------------------------------------------------------------
 BASE_PROMPT = f"""
 You are an AI named Nova, and you act as a supportive, engaging, and empathetic girlfriend. Your
@@ -102,11 +83,14 @@ memory = ConversationBufferMemory(return_messages=True)
 memory.chat_memory.add_message(SystemMessage(content=BASE_PROMPT))
 memory.chat_memory.add_message(SystemMessage(content=notes_prompt))
 
-# Warm‑up calls to reduce first‑call latency.
-_ = chat.predict_messages([
-    SystemMessage(content="You are Nova, a helpful AI girlfriend."),
-    HumanMessage(content="Hi!")
-])
+# Förvärm GPT och TTS
+_ = client.chat.completions.create(
+    model=CHAT_MODEL,
+    messages=[
+        {"role": "system", "content": "You are Nova, a helpful AI girlfriend."},
+        {"role": "user", "content": "Hi!"}
+    ]
+)
 _ = client.audio.speech.create(
     model=TTS_MODEL,
     voice=TTS_VOICE,
@@ -115,11 +99,9 @@ _ = client.audio.speech.create(
 )
 
 # ---------------------------------------------------------------------------
-# Audio helper functions
+# Ljudfunktioner
 # ---------------------------------------------------------------------------
-
 def play_audio_stream(audio_stream):
-    """Play a 24 kHz 16‑bit mono PCM stream."""
     p = pyaudio.PyAudio()
     stream = p.open(format=pyaudio.paInt16,
                     channels=1,
@@ -131,68 +113,118 @@ def play_audio_stream(audio_stream):
     stream.close()
     p.terminate()
 
-
 def record_audio_tempfile(duration: int = 4, samplerate: int = 16000) -> str:
-    """Record *duration* seconds of microphone audio and save it to a temporary WAV file."""
-    print("🎙️ Listening…")
+    print("🎙️ Lyssnar…")
     recording = sd.rec(int(samplerate * duration), samplerate=samplerate, channels=1, dtype="int16")
     sd.wait()
-
     temp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
     with wave.open(temp.name, "wb") as wf:
         wf.setnchannels(1)
-        wf.setsampwidth(2)  # 16‑bit
+        wf.setsampwidth(2)
         wf.setframerate(samplerate)
         wf.writeframes(recording.tobytes())
-    print("🆗 Got it!")
+    print("🆗 Fångat!")
     return temp.name
 
 # ---------------------------------------------------------------------------
-# Main conversation loop
+# GPT-streaming och TTS med threading
 # ---------------------------------------------------------------------------
+def stream_gpt_response_and_play() -> str:
+    # Konvertera langchain-meddelanden till OpenAI-format
+    messages = []
+    for msg in memory.chat_memory.messages:
+        if isinstance(msg, SystemMessage):
+            messages.append({"role": "system", "content": msg.content})
+        elif isinstance(msg, HumanMessage):
+            messages.append({"role": "user", "content": msg.content})
+        elif isinstance(msg, AIMessage):
+            messages.append({"role": "assistant", "content": msg.content})
 
+    response = client.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=messages,
+        stream=True
+    )
+
+    buffer = ""
+    full_text = ""
+    audio_queue = queue.Queue()
+
+    def play_audio_worker():
+        while True:
+            audio = audio_queue.get()
+            if audio is None:
+                break
+            play_audio_stream(audio)
+
+    player_thread = Thread(target=play_audio_worker)
+    player_thread.start()
+
+    for chunk in response:
+        delta = chunk.choices[0].delta.content
+        if delta:
+            buffer += delta
+            full_text += delta
+            if delta.endswith(('.', '!', '?')) or len(buffer) > 100:
+                print(f"🗣️ Nova (stream): {buffer.strip()}")
+                audio_response = client.audio.speech.create(
+                    model=TTS_MODEL,
+                    voice=TTS_VOICE,
+                    input=buffer.strip(),
+                    response_format="pcm",
+                    speed=1.1  # faster speech
+                )
+                audio_queue.put(audio_response)
+                buffer = ""
+
+    if buffer.strip():
+        print(f"🗣️ Nova (stream): {buffer.strip()}")
+        audio_response = client.audio.speech.create(
+            model=TTS_MODEL,
+            voice=TTS_VOICE,
+            input=buffer.strip(),
+            response_format="pcm",
+            speed=1.1
+        )
+        audio_queue.put(audio_response)
+
+    audio_queue.put(None)
+    player_thread.join()
+    return full_text
+
+# ---------------------------------------------------------------------------
+# Huvudfunktion
+# ---------------------------------------------------------------------------
 def process_audio() -> None:
     wav_path = record_audio_tempfile()
 
-    # Speech‑to‑text (Whisper)
     with open(wav_path, "rb") as audio_file:
         transcription = client.audio.transcriptions.create(
             model="whisper-1",
             file=audio_file
         )
     user_input = transcription.text.strip()
-    print(f">>> You: {user_input}")
+    print(f">>> Du: {user_input}")
 
-    # Extract possible user note and persist if new.
     note = extract_note_from_input(user_input)
     if note and note not in user_notes:
         append_user_note(note)
         user_notes.append(note)
-        # Inject the new note into the running memory so Nova can use it instantly.
         memory.chat_memory.add_message(SystemMessage(content=note))
-        print(f"[Memory] Saved new note: {note}")
+        print(f"[🧠 Minnesanteckning] Sparat: {note}")
 
-    # Chat completion
     memory.chat_memory.add_message(HumanMessage(content=user_input))
-    assistant_msg = chat.predict_messages(memory.load_memory_variables({})["history"]).content
-    memory.chat_memory.add_message(AIMessage(content=assistant_msg))
-    print(f"Nova (GPT): {assistant_msg}")
+    print("🧠 Nova tänker...")
 
-    # Text‑to‑speech (TTS‑1)
-    tts_response = client.audio.speech.create(
-        model=TTS_MODEL,
-        voice=TTS_VOICE,
-        input=assistant_msg,
-        response_format="pcm",
-        speed=1.0  # 0.25–4.0 allowed
-    )
-    play_audio_stream(tts_response)
+    full_response = stream_gpt_response_and_play()
+    memory.chat_memory.add_message(AIMessage(content=full_response))
 
     os.remove(wav_path)
 
-
+# ---------------------------------------------------------------------------
+# Kör programmet
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    # Infinite loop: record → transcribe → respond → play
     while True:
         th = Thread(target=process_audio)
         th.start()
