@@ -20,7 +20,8 @@ from langchain.schema import AIMessage, HumanMessage, SystemMessage
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 USER_NAME = "Love"
-MEMORY_FILE = "user_memory.txt"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MEMORY_FILE = os.path.join(BASE_DIR, "user_memory.txt")
 TTS_MODEL = "tts-1"
 TTS_VOICE = "nova"
 CHAT_MODEL = "gpt-4.1-mini"
@@ -28,12 +29,18 @@ CHAT_MODEL = "gpt-4.1-mini"
 def load_user_notes() -> List[str]:
     if not os.path.exists(MEMORY_FILE):
         return []
+    if os.path.islink(MEMORY_FILE):
+        raise RuntimeError(f"Refusing to load notes from symlinked file: {MEMORY_FILE}")
     with open(MEMORY_FILE, "r", encoding="utf-8") as f:
         return [line.strip() for line in f if line.strip()]
 
 def append_user_note(note: str) -> None:
     if note and note not in load_user_notes():
-        with open(MEMORY_FILE, "a", encoding="utf-8") as f:
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(MEMORY_FILE, flags, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
             f.write(note + "\n")
 
 def extract_note_from_input(text: str) -> Optional[str]:
@@ -122,14 +129,14 @@ def record_audio_tempfile_vad(samplerate: int = 16000, silence_threshold: float 
             duration += block_duration
 
     print("🆗 Got you")
-    temp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-    with wave.open(temp.name, "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(samplerate)
-        wf.writeframes(b''.join([b.tobytes() for b in frames]))
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp:
+        with wave.open(temp.name, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(samplerate)
+            wf.writeframes(b''.join([b.tobytes() for b in frames]))
 
-    return temp.name
+        return temp.name
 
 def stream_gpt_response_and_play() -> str:
     messages = []

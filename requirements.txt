@@ -1,7 +1,7 @@
-openai
-pyaudio
-pygame
-SpeechRecognition
-setuptools
-langchain-community
-scipy
+openai>=1.0.0,<2.0.0
+pyaudio>=0.2.13,<0.3
+pygame>=2.1.3,<3
+SpeechRecognition>=3.8.1,<4
+setuptools>=65.0.0,<68
+langchain-community>=0.0.34,<1
+scipy>=1.10.0,<2
