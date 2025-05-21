@@ -156,6 +156,8 @@ def stream_gpt_response_and_play() -> str:
     print(f"🧠 Nova (full): {full_text}")
 
     sentences = re.findall(r'[^.!?]+[.!?]"?', full_text, re.DOTALL)
+    if not sentences:
+        sentences = [full_text]
     audio_queue = queue.Queue()
 
     def play_audio_worker():
