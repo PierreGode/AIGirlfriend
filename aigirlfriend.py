@@ -5,10 +5,9 @@ import re
 import wave
 import tempfile
 import warnings
-import queue
+import base64
 from threading import Thread
 from typing import List, Optional
-import concurrent.futures
 
 import numpy as np
 import pyaudio
@@ -21,9 +20,8 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 USER_NAME = "Love"
 MEMORY_FILE = "user_memory.txt"
-TTS_MODEL = "tts-1"
-TTS_VOICE = "nova"
-CHAT_MODEL = "gpt-4.1-mini"
+VOICE_MODEL = "gpt-5-nano"
+TTS_VOICE = "alloy"
 
 def load_user_notes() -> List[str]:
     if not os.path.exists(MEMORY_FILE):
@@ -73,32 +71,16 @@ memory = ConversationBufferMemory(return_messages=True)
 memory.chat_memory.add_message(SystemMessage(content=BASE_PROMPT))
 memory.chat_memory.add_message(SystemMessage(content=notes_prompt))
 
-# Preload models
-_ = client.chat.completions.create(
-    model=CHAT_MODEL,
-    messages=[
+# Preload voice model
+_ = client.responses.create(
+    model=VOICE_MODEL,
+    input=[
         {"role": "system", "content": "You are Nova, a helpful AI girlfriend."},
         {"role": "user", "content": "Hi!"}
-    ]
+    ],
+    modalities=["text", "audio"],
+    audio={"voice": TTS_VOICE, "format": "pcm"}
 )
-_ = client.audio.speech.create(
-    model=TTS_MODEL,
-    voice=TTS_VOICE,
-    input="Hello!",
-    response_format="pcm"
-)
-
-def play_audio_stream(audio_stream):
-    p = pyaudio.PyAudio()
-    stream = p.open(format=pyaudio.paInt16,
-                    channels=1,
-                    rate=24000,
-                    output=True)
-    for chunk in audio_stream.iter_bytes(chunk_size=1024):
-        stream.write(chunk)
-    stream.stop_stream()
-    stream.close()
-    p.terminate()
 
 def record_audio_tempfile_vad(samplerate: int = 16000, silence_threshold: float = 0.07, max_duration: int = 20) -> str:
     print("🎙️ Listening…")
@@ -141,61 +123,28 @@ def stream_gpt_response_and_play() -> str:
         elif isinstance(msg, AIMessage):
             messages.append({"role": "assistant", "content": msg.content})
 
-    response = client.chat.completions.create(
-        model=CHAT_MODEL,
-        messages=messages,
-        stream=True
-    )
-
     full_text = ""
-    for chunk in response:
-        delta = chunk.choices[0].delta.content
-        if delta:
-            full_text += delta
+    p = pyaudio.PyAudio()
+    stream = p.open(format=pyaudio.paInt16, channels=1, rate=24000, output=True)
 
+    with client.responses.stream(
+        model=VOICE_MODEL,
+        input=messages,
+        modalities=["text", "audio"],
+        audio={"voice": TTS_VOICE, "format": "pcm"}
+    ) as response:
+        for event in response:
+            if event.type == "response.output_audio.delta":
+                stream.write(base64.b64decode(event.delta))
+            elif event.type == "response.text.delta":
+                print(event.delta, end="", flush=True)
+                full_text += event.delta
+
+    stream.stop_stream()
+    stream.close()
+    p.terminate()
+    print()  # newline after streaming text
     print(f"🧠 Nova (full): {full_text}")
-
-    sentences = re.findall(r'[^.!?]+[.!?]"?', full_text, re.DOTALL)
-    audio_queue = queue.Queue()
-
-    def play_audio_worker():
-        while True:
-            audio = audio_queue.get()
-            if audio is None:
-                break
-            play_audio_stream(audio)
-
-    player_thread = Thread(target=play_audio_worker)
-    player_thread.start()
-
-    def generate_audio(index: int, sentence: str) -> tuple[int, any]:
-        print(f"🗣️ Nova (buffered): {sentence}")
-        audio = client.audio.speech.create(
-            model=TTS_MODEL,
-            voice=TTS_VOICE,
-            input=sentence,
-            response_format="pcm",
-            speed=1.0
-        )
-        return index, audio
-
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = []
-        for idx, sentence in enumerate(sentences):
-            sentence = sentence.strip()
-            if sentence:
-                futures.append(executor.submit(generate_audio, idx, sentence))
-
-        results = [None] * len(futures)
-        for future in concurrent.futures.as_completed(futures):
-            idx, audio = future.result()
-            results[idx] = audio
-
-        for audio in results:
-            audio_queue.put(audio)
-
-    audio_queue.put(None)
-    player_thread.join()
     return full_text
 
 def process_audio() -> None:

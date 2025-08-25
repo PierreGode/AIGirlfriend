@@ -1,6 +1,6 @@
 # AIGirlfriend
 
-Voice Ai gpt-4.1-mini GirlFriend
+Voice AI girlfriend powered by `gpt-5-nano` with streaming text and speech.
 
 Clone repo to Windows machine
 ```
@@ -17,7 +17,7 @@ Set AI key in Enviroment
 $env:OPENAI_API_KEY="sk-proj-"
 ```
 
-Edit aigirlfriend.py and set your name by changing "Love"
+Edit `aigirlfriend.py` and set your name by changing `"Love"`.
 
-updated
-streams audio, give improved speed.
+The assistant now uses the unified `gpt-5-nano` voice model to stream
+text and audio in a single request for lower latency and cost.
