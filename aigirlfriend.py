@@ -103,37 +103,42 @@ def play_audio_stream(audio_stream):
 def record_audio_tempfile_vad(
     samplerate: int = 16000, db_threshold: float = 50.0, max_duration: int = 20
 ) -> Optional[str]:
+    """Record audio until the user stops speaking.
+
+    The function waits indefinitely for speech above the dB threshold and only
+    returns after a short silence following the detected speech. This prevents
+    the system from repeatedly printing "No speech detected" while passively
+    listening.
+    """
+
     print("🎙️ Listening…")
-    duration = 0
-    silence_duration = 0
-    frames = []
+    frames: list[np.ndarray] = []
     block_duration = 0.2
     block_size = int(samplerate * block_duration)
+    silence_duration = 0.0
+    speech_duration = 0.0
     has_speech = False
 
     with sd.InputStream(samplerate=samplerate, channels=1, dtype="int16") as stream:
-        while duration < max_duration:
+        while True:
             block, _ = stream.read(block_size)
             rms = np.sqrt(np.mean(block.astype(np.float32) ** 2))
             volume_db = 20 * np.log10(rms / 32768 + 1e-10) + 100
 
             if volume_db >= db_threshold:
                 has_speech = True
-                silence_duration = 0
+                silence_duration = 0.0
+                speech_duration += block_duration
                 frames.append(block)
-            else:
+                if speech_duration >= max_duration:
+                    break
+            elif has_speech:
                 silence_duration += block_duration
-                if has_speech:
-                    frames.append(block)
-                    if silence_duration > 1.0:
-                        break
-                elif silence_duration > 3.0:
+                frames.append(block)
+                if silence_duration > 1.0:
                     break
 
-            duration += block_duration
-
     if not has_speech:
-        print("⚠️ No speech detected.")
         return None
 
     print("🆗 Got you")
