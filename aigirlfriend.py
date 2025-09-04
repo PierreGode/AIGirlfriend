@@ -100,7 +100,7 @@ def play_audio_stream(audio_stream):
     stream.close()
     p.terminate()
 
-def record_audio_tempfile_vad(samplerate: int = 16000, silence_threshold: float = 0.07, max_duration: int = 20) -> str:
+def record_audio_tempfile_vad(samplerate: int = 16000, db_threshold: float = 50.0, max_duration: int = 20) -> str:
     print("🎙️ Listening…")
     duration = 0
     silence_duration = 0
@@ -112,8 +112,9 @@ def record_audio_tempfile_vad(samplerate: int = 16000, silence_threshold: float 
         while duration < max_duration:
             block, _ = stream.read(block_size)
             frames.append(block)
-            volume_norm = np.linalg.norm(block) / len(block)
-            if volume_norm < silence_threshold:
+            rms = np.sqrt(np.mean(block.astype(np.float32) ** 2))
+            volume_db = 20 * np.log10(rms / 32768 + 1e-10) + 100
+            if volume_db < db_threshold:
                 silence_duration += block_duration
                 if silence_duration > 1.0:
                     break
