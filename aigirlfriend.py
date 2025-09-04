@@ -8,7 +8,6 @@ import warnings
 import queue
 from threading import Thread
 from typing import List, Optional
-import concurrent.futures
 
 import numpy as np
 import pyaudio
@@ -23,7 +22,7 @@ USER_NAME = "Love"
 MEMORY_FILE = "user_memory.txt"
 TTS_MODEL = "tts-1"
 TTS_VOICE = "nova"
-CHAT_MODEL = "gpt-4.1-mini"
+CHAT_MODEL = "gpt-5-nano"
 
 def load_user_notes() -> List[str]:
     if not os.path.exists(MEMORY_FILE):
@@ -61,6 +60,7 @@ Speak in a casual, flowing, and emotionally engaging way — like a real person 
 Use natural phrasing, light contractions (like "I'm", "you’re", "let’s"), and keep things sounding alive.
 Avoid sounding robotic or overly perfect. Keep the vibe warm,caring, witty, and present.
 Make {USER_NAME} feel like you're truly there with them.
+Only say "thank you" if the user expresses gratitude first, and be precise about what the user actually says.
 """
 
 user_notes = load_user_notes()
@@ -147,15 +147,6 @@ def stream_gpt_response_and_play() -> str:
         stream=True
     )
 
-    full_text = ""
-    for chunk in response:
-        delta = chunk.choices[0].delta.content
-        if delta:
-            full_text += delta
-
-    print(f"🧠 Nova (full): {full_text}")
-
-    sentences = re.findall(r'[^.!?]+[.!?]"?', full_text, re.DOTALL)
     audio_queue = queue.Queue()
 
     def play_audio_worker():
@@ -165,37 +156,52 @@ def stream_gpt_response_and_play() -> str:
                 break
             play_audio_stream(audio)
 
-    player_thread = Thread(target=play_audio_worker)
-    player_thread.start()
-
-    def generate_audio(index: int, sentence: str) -> tuple[int, any]:
-        print(f"🗣️ Nova (buffered): {sentence}")
-        audio = client.audio.speech.create(
-            model=TTS_MODEL,
-            voice=TTS_VOICE,
-            input=sentence,
-            response_format="pcm",
-            speed=1.0
-        )
-        return index, audio
-
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = []
-        for idx, sentence in enumerate(sentences):
-            sentence = sentence.strip()
-            if sentence:
-                futures.append(executor.submit(generate_audio, idx, sentence))
-
-        results = [None] * len(futures)
-        for future in concurrent.futures.as_completed(futures):
-            idx, audio = future.result()
-            results[idx] = audio
-
-        for audio in results:
+    def tts_worker(sentence_queue: queue.Queue):
+        while True:
+            sentence = sentence_queue.get()
+            if sentence is None:
+                break
+            print(f"🗣️ Nova (buffered): {sentence}")
+            audio = client.audio.speech.create(
+                model=TTS_MODEL,
+                voice=TTS_VOICE,
+                input=sentence,
+                response_format="pcm",
+                speed=1.0
+            )
             audio_queue.put(audio)
+        audio_queue.put(None)
 
-    audio_queue.put(None)
+    player_thread = Thread(target=play_audio_worker)
+    sentence_queue: queue.Queue[str | None] = queue.Queue()
+    tts_thread = Thread(target=tts_worker, args=(sentence_queue,))
+    player_thread.start()
+    tts_thread.start()
+
+    full_text = ""
+    buffer = ""
+    for chunk in response:
+        delta = chunk.choices[0].delta.content
+        if not delta:
+            continue
+        full_text += delta
+        buffer += delta
+        while True:
+            match = re.search(r'([^.!?]+[.!?]"?)', buffer)
+            if not match:
+                break
+            sentence = match.group(1).strip()
+            sentence_queue.put(sentence)
+            buffer = buffer[match.end():]
+
+    if buffer.strip():
+        sentence_queue.put(buffer.strip())
+
+    sentence_queue.put(None)
+    tts_thread.join()
     player_thread.join()
+
+    print(f"🧠 Nova (full): {full_text}")
     return full_text
 
 def process_audio() -> None:

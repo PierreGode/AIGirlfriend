@@ -1,6 +1,6 @@
 # AIGirlfriend
 
-Voice Ai gpt-4.1-mini GirlFriend
+Voice AI gpt-5-nano GirlFriend
 
 Clone repo to Windows machine
 ```
@@ -20,4 +20,4 @@ $env:OPENAI_API_KEY="sk-proj-"
 Edit aigirlfriend.py and set your name by changing "Love"
 
 updated
-streams audio, give improved speed.
+now streams audio while generating for reduced lag.
