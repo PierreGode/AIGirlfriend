@@ -88,17 +88,13 @@ _ = client.audio.speech.create(
     response_format="pcm"
 )
 
-def play_audio_stream(audio_stream):
-    p = pyaudio.PyAudio()
-    stream = p.open(format=pyaudio.paInt16,
-                    channels=1,
-                    rate=24000,
-                    output=True)
+def play_audio_stream(stream, audio_stream):
+    """Write an audio stream to an already-open PyAudio stream."""
+    # Send a brief burst of silence before each sentence so the first word
+    # isn't clipped when playback resumes.
+    stream.write(b"\x00" * 2400)  # ~50ms at 24 kHz
     for chunk in audio_stream.iter_bytes(chunk_size=1024):
         stream.write(chunk)
-    stream.stop_stream()
-    stream.close()
-    p.terminate()
 
 def record_audio_tempfile_vad(
     samplerate: int = 16000, db_threshold: float = 50.0, max_duration: int = 20
@@ -170,11 +166,21 @@ def stream_gpt_response_and_play() -> str:
     audio_queue = queue.Queue()
 
     def play_audio_worker():
+        p = pyaudio.PyAudio()
+        stream = p.open(format=pyaudio.paInt16,
+                        channels=1,
+                        rate=24000,
+                        output=True)
+        # Prime the device once so it is ready for immediate playback.
+        stream.write(b"\x00" * 4800)
         while True:
             audio = audio_queue.get()
             if audio is None:
                 break
-            play_audio_stream(audio)
+            play_audio_stream(stream, audio)
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
 
     def tts_worker(sentence_queue: queue.Queue):
         while True:
