@@ -100,26 +100,46 @@ def play_audio_stream(audio_stream):
     stream.close()
     p.terminate()
 
-def record_audio_tempfile_vad(samplerate: int = 16000, silence_threshold: float = 0.07, max_duration: int = 20) -> str:
+def record_audio_tempfile_vad(
+    samplerate: int = 16000, db_threshold: float = 50.0, max_duration: int = 20
+) -> Optional[str]:
+    """Record audio until the user stops speaking.
+
+    The function waits indefinitely for speech above the dB threshold and only
+    returns after a short silence following the detected speech. This prevents
+    the system from repeatedly printing "No speech detected" while passively
+    listening.
+    """
+
     print("🎙️ Listening…")
-    duration = 0
-    silence_duration = 0
-    frames = []
+    frames: list[np.ndarray] = []
     block_duration = 0.2
     block_size = int(samplerate * block_duration)
+    silence_duration = 0.0
+    speech_duration = 0.0
+    has_speech = False
 
-    with sd.InputStream(samplerate=samplerate, channels=1, dtype='int16') as stream:
-        while duration < max_duration:
+    with sd.InputStream(samplerate=samplerate, channels=1, dtype="int16") as stream:
+        while True:
             block, _ = stream.read(block_size)
-            frames.append(block)
-            volume_norm = np.linalg.norm(block) / len(block)
-            if volume_norm < silence_threshold:
+            rms = np.sqrt(np.mean(block.astype(np.float32) ** 2))
+            volume_db = 20 * np.log10(rms / 32768 + 1e-10) + 100
+
+            if volume_db >= db_threshold:
+                has_speech = True
+                silence_duration = 0.0
+                speech_duration += block_duration
+                frames.append(block)
+                if speech_duration >= max_duration:
+                    break
+            elif has_speech:
                 silence_duration += block_duration
+                frames.append(block)
                 if silence_duration > 1.0:
                     break
-            else:
-                silence_duration = 0
-            duration += block_duration
+
+    if not has_speech:
+        return None
 
     print("🆗 Got you")
     temp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
@@ -127,7 +147,7 @@ def record_audio_tempfile_vad(samplerate: int = 16000, silence_threshold: float 
         wf.setnchannels(1)
         wf.setsampwidth(2)
         wf.setframerate(samplerate)
-        wf.writeframes(b''.join([b.tobytes() for b in frames]))
+        wf.writeframes(b"".join([b.tobytes() for b in frames]))
 
     return temp.name
 
@@ -206,6 +226,8 @@ def stream_gpt_response_and_play() -> str:
 
 def process_audio() -> None:
     wav_path = record_audio_tempfile_vad()
+    if not wav_path:
+        return
 
     with open(wav_path, "rb") as audio_file:
         transcription = client.audio.transcriptions.create(
