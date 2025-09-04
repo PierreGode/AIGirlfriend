@@ -100,27 +100,41 @@ def play_audio_stream(audio_stream):
     stream.close()
     p.terminate()
 
-def record_audio_tempfile_vad(samplerate: int = 16000, db_threshold: float = 50.0, max_duration: int = 20) -> str:
+def record_audio_tempfile_vad(
+    samplerate: int = 16000, db_threshold: float = 50.0, max_duration: int = 20
+) -> Optional[str]:
     print("🎙️ Listening…")
     duration = 0
     silence_duration = 0
     frames = []
     block_duration = 0.2
     block_size = int(samplerate * block_duration)
+    has_speech = False
 
-    with sd.InputStream(samplerate=samplerate, channels=1, dtype='int16') as stream:
+    with sd.InputStream(samplerate=samplerate, channels=1, dtype="int16") as stream:
         while duration < max_duration:
             block, _ = stream.read(block_size)
-            frames.append(block)
             rms = np.sqrt(np.mean(block.astype(np.float32) ** 2))
             volume_db = 20 * np.log10(rms / 32768 + 1e-10) + 100
-            if volume_db < db_threshold:
-                silence_duration += block_duration
-                if silence_duration > 1.0:
-                    break
-            else:
+
+            if volume_db >= db_threshold:
+                has_speech = True
                 silence_duration = 0
+                frames.append(block)
+            else:
+                silence_duration += block_duration
+                if has_speech:
+                    frames.append(block)
+                    if silence_duration > 1.0:
+                        break
+                elif silence_duration > 3.0:
+                    break
+
             duration += block_duration
+
+    if not has_speech:
+        print("⚠️ No speech detected.")
+        return None
 
     print("🆗 Got you")
     temp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
@@ -128,7 +142,7 @@ def record_audio_tempfile_vad(samplerate: int = 16000, db_threshold: float = 50.
         wf.setnchannels(1)
         wf.setsampwidth(2)
         wf.setframerate(samplerate)
-        wf.writeframes(b''.join([b.tobytes() for b in frames]))
+        wf.writeframes(b"".join([b.tobytes() for b in frames]))
 
     return temp.name
 
@@ -207,6 +221,8 @@ def stream_gpt_response_and_play() -> str:
 
 def process_audio() -> None:
     wav_path = record_audio_tempfile_vad()
+    if not wav_path:
+        return
 
     with open(wav_path, "rb") as audio_file:
         transcription = client.audio.transcriptions.create(
