@@ -94,6 +94,9 @@ def play_audio_stream(audio_stream):
                     channels=1,
                     rate=24000,
                     output=True)
+    # Prime the audio output with a brief silence to prevent the first
+    # chunk from being clipped when the device starts. 4800 bytes ~=0.1s.
+    stream.write(b"\x00" * 4800)
     for chunk in audio_stream.iter_bytes(chunk_size=1024):
         stream.write(chunk)
     stream.stop_stream()
