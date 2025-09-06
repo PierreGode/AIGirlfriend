@@ -1,2 +1,286 @@
+name: "PR Summary and Post-Merge Actions"
 on:
-  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  pr_summary:
+    if: github.event_name == 'pull_request'
+    name: "PR Summary by AI"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Read README.md
+        id: read_readme
+        run: |
+          README_CONTENT=$(cat README.md)
+          echo "README<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$README_CONTENT" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Read Commit Message
+        id: read_commit
+        run: |
+          COMMIT_MSG=$(git log -1 --pretty=%B)
+          echo "COMMIT<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$COMMIT_MSG" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch Initial PR Comment
+        id: fetch_pr_comment
+        run: |
+          PR_NUMBER=${{ github.event.pull_request.number }}
+          TOKEN=${{ secrets.G_TOKEN }}
+          URL="https://api.github.com/repos/${{ github.repository }}/issues/${PR_NUMBER}/comments"
+          response=$(curl -s -H "Authorization: token $TOKEN" "$URL")
+          initial_comment=$(echo "$response" | jq -r '.[0].body')
+          echo "INITIAL_COMMENT<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$initial_comment" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Install OpenAI
+        run: pip install openai
+
+      - name: PR Summary
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.G_TOKEN }}
+          README_CONTENT: ${{ steps.read_readme.outputs.README }}
+          COMMIT_CONTENT: ${{ steps.read_commit.outputs.COMMIT }}
+          INITIAL_COMMENT: ${{ steps.fetch_pr_comment.outputs.INITIAL_COMMENT }}
+        run: |
+          python - <<'EOF'
+          import os
+          import requests
+          import json
+          from openai import OpenAI
+
+          # Load the GitHub event
+          event_path = os.environ.get('GITHUB_EVENT_PATH')
+          with open(event_path, 'r') as f:
+              event = json.load(f)
+
+          pr_number = event.get('pull_request', {}).get('number')
+          pr_title = event.get('pull_request', {}).get('title', '')
+          repo_full_name = event.get('repository', {}).get('full_name')
+          pr_url = event.get('pull_request', {}).get('html_url')
+          token = os.environ.get('GITHUB_TOKEN')
+          openai_key = os.environ.get('OPENAI_API_KEY')
+          readme_content = os.environ.get('README_CONTENT')
+          commit_content = os.environ.get('COMMIT_CONTENT')
+          initial_comment = os.environ.get('INITIAL_COMMENT')
+
+          # Get PR file diffs
+          headers = {
+              'Authorization': f'token {token}',
+              'Accept': 'application/vnd.github+json',
+          }
+          diff_url = event.get('pull_request', {}).get('url') + "/files"
+          response = requests.get(diff_url, headers=headers)
+          response.raise_for_status()
+          pr_files = response.json()
+
+          diff_text = ""
+          for fdata in pr_files:
+              filename = fdata.get('filename')
+              patch = fdata.get('patch', '')
+              if patch:
+                  diff_text += f"File: {filename}\n{patch}\n\n"
+          if not diff_text:
+              diff_text = "No significant changes detected."
+
+          # Construct the summary prompt
+          summary_prompt = (
+              f"Analyze the following Pull Request Diff and summarize the changes following these points in order 1,2,3,4,5:\n\n"
+              f"**README Content:**\n{readme_content}\n\n"
+              f"**Commit Message:**\n{commit_content}\n\n"
+              f"**Pull Request Diff:**\n{diff_text}\n\n"
+              f"**Initial PR Comment:**\n{initial_comment}\n\n"
+              f"Include in this order 1,2,3,4,5:\n"
+              f"1. Key Modified Files: List the main files modified.\n"
+              f"2. Disruption Level: Based on the analysis compared to the additional test for each Disruption Level choose exactly one of the following symbols matching the result of the analysis and output only that symbol on a new line (with only a very short note why that level was chosen):\n"
+              f"   - ✅ Minimal: Changes that don't affect how the program works (e.g. updating comments, renaming variables, minor refactoring). \n"
+              f"   - 🟠 Minor: Adjustments that might slightly change how the program behaves and require extra testing (e.g. modifying default parameters, tweaking logic in functions) \n"
+              f"   - 🔴 Major: Breaking changes that can significantly impact functionality, security, or authentication. For example, modifying API endpoints without proper checks, exposing sensitive credentials (like client IDs and secrets), or altering security or and authentication processes. These types of changes are critical in any code.\n"
+              f"3. Purpose: Indicate if the changes are for bug fixes, new features, or optimizations.\n"
+              f"4. Functional Changes with Relevant Code Examples: Describe any functional changes and include code examples if applicable.\n"
+              f"5. Potential Impacts of Breaking Changes or Performance Concerns in Detail: Explain any possible impacts or performance issues.\n"
+          )
+
+
+          # Call OpenAI API
+          client = OpenAI()
+          result = client.responses.create(
+              model="gpt-5-mini",
+              input=summary_prompt,
+              reasoning={"effort": "low"},
+              text={"verbosity": "low"},
+          )
+          summary = result.output_text.strip()
+
+          # Post the summary as a PR comment
+          comment_url = f"https://api.github.com/repos/{repo_full_name}/issues/{pr_number}/comments"
+          comment_response = requests.post(
+              comment_url,
+              headers=headers,
+              json={"body": f"**AI Pull Request Summary:**\n{summary}"}
+          )
+          comment_response.raise_for_status()
+
+          print("PR Summary posted successfully.")
+          EOF
+
+  code_review:
+    if: github.event_name == 'pull_request'
+    name: AI Code Review
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Read README.md
+        id: read_readme_review
+        run: |
+          README_CONTENT=$(cat README.md)
+          echo "::set-output name=README::$README_CONTENT"
+
+      - name: AI Code Review
+        uses: PierreGode/GPTcode-reviewer@main
+        with:
+          GITHUB_TOKEN: ${{ secrets.G_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_API_MODEL: "gpt-5-mini"
+          exclude: "**/*.json,**/*.md"
+          additional_context: ${{ steps.read_readme_review.outputs.README }}
+
+
+  post_merge:
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    name: "Post-Merge PR Info with AI Summary"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Identify merged PR
+        id: find_pr
+        run: |
+          PR_INFO=$(curl -s -H "Authorization: Bearer ${{ secrets.G_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/commits/${{ github.sha }}/pulls")
+          PR_NUMBER=$(echo "$PR_INFO" | jq -r '.[0].number // empty')
+          if [ -z "$PR_NUMBER" ]; then
+            echo "pr_number=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch PR Creator
+        id: fetch_creator
+        if: steps.find_pr.outputs.pr_number != ''
+        run: |
+          PR_NUMBER="${{ steps.find_pr.outputs.pr_number }}"
+          PR_CREATOR=$(curl -s -H "Authorization: Bearer ${{ secrets.G_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/${PR_NUMBER}" | jq -r '.user.login')
+          echo "pr_creator=$PR_CREATOR" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch PR Title
+        id: fetch_title
+        if: steps.find_pr.outputs.pr_number != ''
+        run: |
+          PR_NUMBER="${{ steps.find_pr.outputs.pr_number }}"
+          PR_TITLE=$(curl -s -H "Authorization: Bearer ${{ secrets.G_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/${PR_NUMBER}" | jq -r '.title')
+          echo "pr_title=$PR_TITLE" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch PR Files
+        id: pr_files
+        if: steps.find_pr.outputs.pr_number != ''
+        run: |
+          PR_NUMBER="${{ steps.find_pr.outputs.pr_number }}"
+          FILES=$(curl -s \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.G_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/${PR_NUMBER}/files" | jq -r '.[].filename' | tr '\n' ', ')
+          FILES=$(echo "$FILES" | sed 's/, $//')
+          echo "files_modified=$FILES" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch AI Summary
+        id: fetch_summary
+        if: steps.find_pr.outputs.pr_number != ''
+        run: |
+          PR_NUMBER="${{ steps.find_pr.outputs.pr_number }}"
+          COMMENTS=$(curl -s -H "Authorization: Bearer ${{ secrets.G_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${PR_NUMBER}/comments")
+          AI_SUMMARY=$(echo "$COMMENTS" | jq -r '.[] | select(.body | contains("AI Pull Request Summary")) | .body' | sed 's/^\*\*AI Pull Request Summary:\*\*//')
+          if [ -z "$AI_SUMMARY" ]; then
+            echo "ai_summary=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "$AI_SUMMARY" > summary.txt
+          echo "ai_summary=summary.txt" >> "$GITHUB_OUTPUT"
+
+      - name: Send AI Summary to Teams
+        if: steps.fetch_summary.outputs.ai_summary != ''
+        run: |
+          AI_SUMMARY=$(cat summary.txt | sed -E 's/^#{1,6}\s+//g')
+          PR_NUMBER="${{ steps.find_pr.outputs.pr_number }}"
+          PR_URL="https://github.com/${{ github.repository }}/pull/${PR_NUMBER}"
+          PR_TITLE="${{ steps.fetch_title.outputs.pr_title }}"
+          PR_CREATOR="${{ steps.fetch_creator.outputs.pr_creator }}"
+          TEAMS_PAYLOAD=$(jq -n \
+            --arg repo_name "${{ github.repository }}" \
+            --arg pr_title "$PR_TITLE" \
+            --arg pr_number "${{ steps.find_pr.outputs.pr_number }}" \
+            --arg pr_url "$PR_URL" \
+            --arg actor "$PR_CREATOR" \
+            --arg files_modified "${{ steps.pr_files.outputs.files_modified }}" \
+            --arg ai_summary "$AI_SUMMARY" \
+            '{
+              "@type": "MessageCard",
+              "@context": "http://schema.org/extensions",
+              "themeColor": "0076D7",
+              "summary": "New AI PR Summary",
+              "sections": [
+                {
+                  "activityTitle": "**📝 AI-Generated PR Summary**",
+                  "activitySubtitle": "📂 Repository: **\($repo_name)**",
+                  "activityImage": "https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png",
+                  "facts": [
+                    { "name": "🔖 Pull Request", "value": "[\($pr_title) (PR #\($pr_number))](\($pr_url))" },
+                    { "name": "📅 Created By", "value": "\($actor)" },
+                    { "name": "📈 Changes", "value": "\($files_modified)" }
+                  ],
+                  "markdown": true
+                },
+                {
+                  "title": "📄 **Summary**",
+                  "text": $ai_summary,
+                  "markdown": true
+                }
+              ],
+              "potentialAction": [
+                {
+                  "@type": "OpenUri",
+                  "name": "🔗 View on GitHub",
+                  "targets": [
+                    { "os": "default", "uri": "\($pr_url)" }
+                  ]
+                }
+              ]
+            }')
+          if [ -n "${{ secrets.TEAMS_WEBHOOK_URL }}" ]; then
+            curl -X POST -H "Content-Type: application/json" -d "$TEAMS_PAYLOAD" ${{ secrets.TEAMS_WEBHOOK_URL }}
+          else
+            echo "Teams webhook URL is not set. Skipping notification."
+          fi
+          if [ -n "${{ secrets.TEAMS_WEBHOOK_URL2 }}" ]; then
+            curl -X POST -H "Content-Type: application/json" -d "$TEAMS_PAYLOAD" ${{ secrets.TEAMS_WEBHOOK_URL2 }}
+          else
+            echo "Teams webhook URL is not set. Skipping notification."
+          fi
