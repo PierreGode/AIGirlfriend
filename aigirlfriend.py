@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import platform
 import re
 import wave
 import tempfile
@@ -11,12 +12,24 @@ from typing import List, Optional
 
 import numpy as np
 import pyaudio
-import sounddevice as sd
 from openai import OpenAI
 from langchain.memory import ConversationBufferMemory
 from langchain.schema import AIMessage, HumanMessage, SystemMessage
 
+try:  # pragma: no cover - optional dependency per platform
+    import sounddevice as sd  # type: ignore
+except ImportError:  # pragma: no cover
+    sd = None
+
 warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+SYSTEM_NAME = platform.system() or "Unknown"
+if SYSTEM_NAME == "Windows" or sd is None:
+    AUDIO_INPUT_BACKEND = "pyaudio"
+else:
+    AUDIO_INPUT_BACKEND = "sounddevice"
+
+print(f"🔊 Detected {SYSTEM_NAME}; using {AUDIO_INPUT_BACKEND} for recording.")
 
 USER_NAME = "Love"
 MEMORY_FILE = "user_memory.txt"
@@ -96,6 +109,13 @@ def play_audio_stream(stream, audio_stream):
     for chunk in audio_stream.iter_bytes(chunk_size=1024):
         stream.write(chunk)
 
+def _calculate_volume_db(samples: np.ndarray) -> float:
+    if samples.size == 0:
+        return -np.inf
+    rms = np.sqrt(np.mean(samples.astype(np.float32) ** 2))
+    return 20 * np.log10(rms / 32768 + 1e-10) + 100
+
+
 def record_audio_tempfile_vad(
     samplerate: int = 16000, db_threshold: float = 50.0, max_duration: int = 20
 ) -> Optional[str]:
@@ -108,31 +128,65 @@ def record_audio_tempfile_vad(
     """
 
     print("🎙️ Listening…")
-    frames: list[np.ndarray] = []
+    frames: list[bytes] = []
     block_duration = 0.2
     block_size = int(samplerate * block_duration)
     silence_duration = 0.0
     speech_duration = 0.0
     has_speech = False
 
-    with sd.InputStream(samplerate=samplerate, channels=1, dtype="int16") as stream:
-        while True:
-            block, _ = stream.read(block_size)
-            rms = np.sqrt(np.mean(block.astype(np.float32) ** 2))
-            volume_db = 20 * np.log10(rms / 32768 + 1e-10) + 100
+    if AUDIO_INPUT_BACKEND == "sounddevice":
+        if sd is None:
+            raise RuntimeError("SoundDevice backend requested but module is not available.")
+        with sd.InputStream(samplerate=samplerate, channels=1, dtype="int16") as stream:
+            while True:
+                block, _ = stream.read(block_size)
+                block_array = block.reshape(-1)
+                volume_db = _calculate_volume_db(block_array)
 
-            if volume_db >= db_threshold:
-                has_speech = True
-                silence_duration = 0.0
-                speech_duration += block_duration
-                frames.append(block)
-                if speech_duration >= max_duration:
-                    break
-            elif has_speech:
-                silence_duration += block_duration
-                frames.append(block)
-                if silence_duration > 1.0:
-                    break
+                if volume_db >= db_threshold:
+                    has_speech = True
+                    silence_duration = 0.0
+                    speech_duration += block_duration
+                    frames.append(block_array.astype(np.int16).tobytes())
+                    if speech_duration >= max_duration:
+                        break
+                elif has_speech:
+                    silence_duration += block_duration
+                    frames.append(block_array.astype(np.int16).tobytes())
+                    if silence_duration > 1.0:
+                        break
+    else:
+        p = pyaudio.PyAudio()
+        stream = p.open(
+            format=pyaudio.paInt16,
+            channels=1,
+            rate=samplerate,
+            input=True,
+            frames_per_buffer=block_size,
+        )
+        try:
+            while True:
+                data = stream.read(block_size, exception_on_overflow=False)
+                block_array = np.frombuffer(data, dtype=np.int16)
+                volume_db = _calculate_volume_db(block_array)
+
+                if volume_db >= db_threshold:
+                    has_speech = True
+                    silence_duration = 0.0
+                    speech_duration += block_duration
+                    frames.append(data)
+                    if speech_duration >= max_duration:
+                        break
+                elif has_speech:
+                    silence_duration += block_duration
+                    frames.append(data)
+                    if silence_duration > 1.0:
+                        break
+        finally:
+            stream.stop_stream()
+            stream.close()
+            p.terminate()
 
     if not has_speech:
         return None
@@ -143,7 +197,7 @@ def record_audio_tempfile_vad(
         wf.setnchannels(1)
         wf.setsampwidth(2)
         wf.setframerate(samplerate)
-        wf.writeframes(b"".join([b.tobytes() for b in frames]))
+        wf.writeframes(b"".join(frames))
 
     return temp.name
 
